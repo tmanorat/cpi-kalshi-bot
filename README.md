@@ -209,3 +209,4 @@ All activity logged to `logs/scheduler.log`. Rotates weekly.
 ```
 tail -f logs/scheduler.log    (Mac/Linux, live log view)
 ```
+# deployed via GitHub Actions
