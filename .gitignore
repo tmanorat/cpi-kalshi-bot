@@ -1,0 +1,39 @@
+# ── Python runtime ────────────────────────────────────────────────
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+
+# ── Secrets — NEVER commit ────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+
+# ── Database ──────────────────────────────────────────────────────
+*.db
+*.db-shm
+*.db-wal
+
+# ── Trained model (large binary — train on server or copy manually)
+models/cpi_forecaster.pkl
+
+# ── Logs ──────────────────────────────────────────────────────────
+logs/
+
+# ── IDE / OS ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ── Claude Code ───────────────────────────────────────────────────
+.claude/

@@ -1,0 +1,42 @@
+# ── Python runtime artifacts ──────────────────────────────────────
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Secrets (injected at runtime via env_file) ────────────────────
+.env
+
+# ── Persistent data (lives in named volumes, not the image) ───────
+*.db
+*.db-shm
+*.db-wal
+logs/
+
+# Trained model binary — large, excluded so the image stays lean.
+# Copy the .pkl into the models_data volume manually after first train,
+# or run:  docker compose exec bot python engine.py train
+models/cpi_forecaster.pkl
+
+# ── Version control ───────────────────────────────────────────────
+.git/
+.gitignore
+
+# ── Deployment scripts (not needed inside containers) ─────────────
+deploy.sh
+deploy.bat
+update.sh
+update.bat
+logs.sh
+logs.bat
+server_setup.sh
+server_setup.bat
+
+# ── IDE / OS ──────────────────────────────────────────────────────
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo

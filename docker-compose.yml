@@ -1,0 +1,63 @@
+# ──────────────────────────────────────────────────────────────────
+# CPI Kalshi Bot — Docker Compose
+#
+# Services:
+#   dashboard  →  python api.py      (FastAPI, host port 8001)
+#   bot        →  python scheduler.py (APScheduler, no exposed port)
+#
+# Port 8001 is used because 8501 is already occupied on the droplet.
+#
+# Named volumes:
+#   models_data  →  /app/models/             (trained .pkl persists)
+#   logs_data    →  /app/logs/               (scheduler log persists)
+#   db_data      →  /app/data/               (SQLite DB file persists)
+#
+# DATABASE_URL is overridden here to place the SQLite file inside
+# the db_data volume (/app/data/).  Named volumes mount as directories,
+# so the file path must be inside a directory — not at /app/kalshi_bot.db
+# directly.  The /app/.env value is ignored for this key in containers.
+# ──────────────────────────────────────────────────────────────────
+
+x-common: &common
+  build: .
+  image: cpi-kalshi-bot:latest
+  env_file: .env
+  environment:
+    # Absolute SQLite path inside the db_data named volume.
+    # 4 slashes = sqlite:// (scheme) + /app/data/... (abs path on Linux)
+    - DATABASE_URL=sqlite:////app/data/kalshi_bot.db
+  volumes:
+    - models_data:/app/models
+    - logs_data:/app/logs
+    - db_data:/app/data
+  networks:
+    - cpi-kalshi-net
+  restart: always
+
+services:
+
+  dashboard:
+    <<: *common
+    container_name: cpi-dashboard
+    command: python api.py
+    ports:
+      - "8001:8000"   # host 8001 → container 8000
+
+  bot:
+    <<: *common
+    container_name: cpi-bot
+    command: python scheduler.py
+    depends_on:
+      - dashboard     # start dashboard first (init_db runs there first)
+
+volumes:
+  models_data:
+  logs_data:
+  db_data:
+
+networks:
+  cpi-kalshi-net:
+    driver: bridge
+    # Explicit name keeps this network isolated from other Compose
+    # projects on the same droplet (the other project at :8501).
+    name: cpi-kalshi-net

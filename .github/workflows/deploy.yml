@@ -1,0 +1,30 @@
+name: Deploy to Droplet
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: root
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/cpi-kalshi-bot
+
+            echo "==> Pulling latest code ..."
+            git fetch origin
+            git reset --hard origin/main
+
+            echo "==> Rebuilding and restarting containers ..."
+            docker compose down
+            docker compose up -d --build
+
+            echo "==> Deploy complete."
+            docker compose ps
