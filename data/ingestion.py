@@ -230,7 +230,7 @@ class FeatureBuilder:
         self.cleveland = ClevelandFedClient()
     
     def build_features(self, reference_period: date, as_of_date: date = None,
-                        _nowcast_cache: dict = None) -> dict:
+                        _nowcast_cache: dict = None, include_nowcast: bool = True) -> dict:
         """
         Build feature vector for predicting CPI for reference_period.
         as_of_date: date we're making the prediction (default = today).
@@ -318,10 +318,18 @@ class FeatureBuilder:
             features["month_sin"] = np.sin(2 * np.pi * reference_period.month / 12)
             features["month_cos"] = np.cos(2 * np.pi * reference_period.month / 12)
             
-            # --- Cleveland Fed nowcast (use cached value if provided) ---
-            nowcast = _nowcast_cache if _nowcast_cache is not None else self.cleveland.get_latest_nowcast()
-            features["cleveland_nowcast_yoy"] = nowcast.get("cpi_yoy_nowcast")
-            features["cleveland_nowcast_mom"] = nowcast.get("cpi_mom_nowcast")
+            # --- Cleveland Fed nowcast ---
+            # Only fetched for live predictions. During training we cannot
+            # time-travel to get historical nowcasts, so we leave these NaN.
+            # (These fields are not in FEATURE_COLUMNS so they don't affect
+            # Ridge/XGBoost, but excluding them keeps the intent explicit.)
+            if include_nowcast:
+                nowcast = _nowcast_cache if _nowcast_cache is not None else self.cleveland.get_latest_nowcast()
+                features["cleveland_nowcast_yoy"] = nowcast.get("cpi_yoy_nowcast")
+                features["cleveland_nowcast_mom"] = nowcast.get("cpi_mom_nowcast")
+            else:
+                features["cleveland_nowcast_yoy"] = np.nan
+                features["cleveland_nowcast_mom"] = np.nan
             
         except Exception as e:
             logger.error(f"Feature building error for {reference_period}: {e}")
@@ -350,15 +358,15 @@ class FeatureBuilder:
         # Filter to start_year+
         cpi = cpi[cpi.index.year >= start_year]
         
-        # Fetch nowcast once — it's a live endpoint, same value for all historical rows
-        logger.info("Fetching Cleveland Fed nowcast (once, cached for all training rows)...")
-        nowcast_cache = self.cleveland.get_latest_nowcast()
-
+        # Do NOT fetch the Cleveland nowcast for training rows — we have no
+        # historical nowcast data, so applying today's nowcast to 1995–2024
+        # rows would be look-ahead bias. The nowcast is blended in at
+        # prediction time (live only) via engine.py → forecaster.predict().
         rows = []
         for dt in cpi.index:
             ref_period = dt.date()
             features = self.build_features(ref_period, as_of_date=ref_period - timedelta(days=5),
-                                           _nowcast_cache=nowcast_cache)
+                                           include_nowcast=False)
             target = float(cpi.loc[dt, "mom"])
             features["target_cpi_mom"] = target
             features["reference_period"] = ref_period

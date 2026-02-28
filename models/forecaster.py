@@ -141,35 +141,85 @@ class CPIForecaster:
             logger.info(f"✅ Model trained successfully (v{self.VERSION})")
     
     def _walk_forward_validation(self, df: pd.DataFrame, verbose: bool):
-        """Walk-forward validation to detect overfitting."""
+        """
+        Walk-forward validation using the FULL ensemble (Ridge + XGBoost).
+
+        Each fold:
+        - Fits its own scaler on training data only (no test leakage)
+        - Selects Ridge alpha via inner TimeSeriesSplit CV
+        - Trains both Ridge and XGBoost
+        - Predicts with the same ensemble weights used in production
+
+        The residuals from this replace training_errors as the sigma basis,
+        so uncertainty estimates reflect actual out-of-sample ensemble error
+        rather than in-sample Ridge error.
+        """
         n = len(df)
-        min_train = min(120, int(n * 0.6))  # At least 10 years
-        
+        min_train = min(120, int(n * 0.6))  # At least 10 years of seed data
+
+        # Save in-sample ensemble RMSE before overwriting training_errors
+        insample_rmse = float(np.sqrt(np.mean(self.training_errors ** 2)))
+
         wf_errors = []
-        
+
         for i in range(min_train, n):
             train_df = df.iloc[:i]
-            test_df = df.iloc[i:i+1]
-            
-            X_train = self.scaler.fit_transform(self._prepare_X(train_df))
-            X_test = self.scaler.transform(self._prepare_X(test_df))
+            test_df  = df.iloc[i:i + 1]
+
+            X_train_raw = self._prepare_X(train_df)
+            X_test_raw  = self._prepare_X(test_df)
             y_train = train_df[TARGET].values
-            y_test = test_df[TARGET].values
-            
-            r = Ridge(alpha=1.0)
-            r.fit(X_train, y_train)
-            pred = r.predict(X_test)
-            wf_errors.append(float(y_test[0] - pred[0]))
-        
-        wf_rmse = np.sqrt(np.mean(np.array(wf_errors)**2))
-        train_rmse = np.sqrt(np.mean(self.training_errors**2))
-        
+            y_test  = test_df[TARGET].values
+
+            # Scaler fitted on training fold only — no test-set leakage
+            fold_scaler = StandardScaler()
+            X_train = fold_scaler.fit_transform(X_train_raw)
+            X_test  = fold_scaler.transform(X_test_raw)
+
+            # Ridge alpha selection via inner CV (skip if too few samples)
+            best_alpha = 1.0
+            if len(train_df) >= 40:
+                n_inner = min(5, max(2, len(train_df) // 20))
+                inner_cv = TimeSeriesSplit(n_splits=n_inner, gap=1)
+                best_score = np.inf
+                for alpha in [0.01, 0.1, 1.0, 10.0, 100.0]:
+                    scores = -cross_val_score(
+                        Ridge(alpha=alpha), X_train, y_train,
+                        cv=inner_cv, scoring="neg_mean_squared_error"
+                    )
+                    if scores.mean() < best_score:
+                        best_score = scores.mean()
+                        best_alpha = alpha
+
+            fold_ridge = Ridge(alpha=best_alpha)
+            fold_ridge.fit(X_train, y_train)
+
+            fold_xgb = XGBRegressor(
+                n_estimators=100, max_depth=3, learning_rate=0.05,
+                subsample=0.8, colsample_bytree=0.8,
+                random_state=42, verbosity=0
+            )
+            fold_xgb.fit(X_train, y_train)
+
+            # Ensemble prediction with production weights
+            pred = (self.ridge_weight * fold_ridge.predict(X_test)[0] +
+                    self.xgb_weight  * fold_xgb.predict(X_test)[0])
+
+            wf_errors.append(float(y_test[0] - pred))
+
+        wf_rmse = float(np.sqrt(np.mean(np.array(wf_errors) ** 2)))
+
         if verbose:
-            logger.info(f"Walk-forward RMSE: {wf_rmse:.4f} | Train RMSE: {train_rmse:.4f}")
-            if wf_rmse > 2.0 * train_rmse:
-                logger.warning("⚠️  OVERFITTING DETECTED: walk-forward RMSE >> train RMSE")
-        
-        # Store walk-forward errors as the sigma basis (more honest than train errors)
+            logger.info(
+                f"Walk-forward RMSE (ensemble): {wf_rmse:.4f} | "
+                f"In-sample RMSE (ensemble):    {insample_rmse:.4f} | "
+                f"n_folds: {len(wf_errors)}"
+            )
+            if wf_rmse > 2.0 * insample_rmse:
+                logger.warning("⚠️  OVERFITTING DETECTED: walk-forward RMSE >> in-sample RMSE")
+
+        # Replace training_errors with honest walk-forward residuals.
+        # sigma will now reflect actual out-of-sample ensemble uncertainty.
         self.training_errors = np.array(wf_errors)
     
     def predict(self, features: dict, spf_forecast: float = None, 
