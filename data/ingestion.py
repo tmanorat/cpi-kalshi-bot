@@ -100,6 +100,22 @@ class FREDClient:
     def get_food_cpi(self) -> pd.DataFrame:
         return self.get_series("CPIFABSL")
 
+    def get_fed_funds_rate(self) -> pd.DataFrame:
+        """Effective federal funds rate (monthly, FEDFUNDS)."""
+        return self.get_series("FEDFUNDS")
+
+    def get_core_cpi(self) -> pd.DataFrame:
+        """CPI less food and energy, seasonally adjusted (CPILFESL)."""
+        return self.get_series("CPILFESL")
+
+    def get_10y_yield(self) -> pd.DataFrame:
+        """10-Year Treasury constant maturity rate (DGS10, daily — use monthly average)."""
+        return self.get_series("DGS10")
+
+    def get_unemployment_rate(self) -> pd.DataFrame:
+        """Civilian unemployment rate (UNRATE)."""
+        return self.get_series("UNRATE")
+
 
 # ─────────────────────────────────────────────
 # BLS DATA
@@ -313,6 +329,36 @@ class FeatureBuilder:
             food_cpi["mom"] = food_cpi["value"].pct_change() * 100
             features["food_cpi_lag1"] = self._get_value_at(food_cpi["mom"], lag1_date)
             
+            # --- Macro factors (v2.0) ---
+            # Fed funds rate: monetary policy stance
+            try:
+                ffr = self.fred.get_fed_funds_rate()
+                features["fed_funds_rate"] = self._get_value_at(ffr["value"], lag1_date)
+            except Exception:
+                features["fed_funds_rate"] = np.nan
+
+            # Core CPI (less food & energy): underlying trend signal
+            try:
+                core = self.fred.get_core_cpi()
+                core["mom"] = core["value"].pct_change() * 100
+                features["core_cpi_lag1_mom"] = self._get_value_at(core["mom"], lag1_date)
+            except Exception:
+                features["core_cpi_lag1_mom"] = np.nan
+
+            # 10-Year Treasury yield: inflation expectations embedded in bond market
+            try:
+                t10y = self.fred.get_10y_yield()
+                features["treasury_10y"] = self._get_value_at(t10y["value"], lag1_date)
+            except Exception:
+                features["treasury_10y"] = np.nan
+
+            # Unemployment rate: labour-market slack (Phillips curve signal)
+            try:
+                unemp = self.fred.get_unemployment_rate()
+                features["unemp_rate"] = self._get_value_at(unemp["value"], lag1_date)
+            except Exception:
+                features["unemp_rate"] = np.nan
+
             # --- Seasonality (month-of-year dummies) ---
             features["month"] = reference_period.month
             features["month_sin"] = np.sin(2 * np.pi * reference_period.month / 12)

@@ -13,7 +13,7 @@ from loguru import logger
 from dotenv import load_dotenv
 
 from data.database import (
-    get_session, ModelForecast, KalshiMarketSnapshot, 
+    get_session, ModelForecast, EconomicRelease, KalshiMarketSnapshot,
     Trade, PaperPortfolio, PerformanceLog
 )
 from data.ingestion import FeatureBuilder, run_data_ingestion
@@ -533,21 +533,123 @@ class TradingEngine:
         return datetime(release_date.year, release_date.month, release_date.day, 13, 30, 0)
     
     # ─────────────────────────────────────────────
+    # CONCEPT DRIFT DETECTION
+    # ─────────────────────────────────────────────
+
+    def _check_concept_drift(self) -> dict:
+        """
+        Compare recent live forecast errors to historical walk-forward RMSE.
+
+        Pulls the last 12 months of ModelForecast rows that have a matching
+        EconomicRelease (i.e. the CPI has been published and we can measure error).
+        Compares the live RMSE against the model's calibrated walk-forward RMSE.
+
+        Thresholds:
+          ratio > 1.5 → critical (red alert, consider manual review)
+          ratio > 1.2 → warning  (drift starting, monitor closely)
+          ratio ≤ 1.2 → healthy
+        """
+        if not self.model or not self.model.is_trained:
+            return {"status": "no_model"}
+
+        session = get_session()
+        try:
+            cutoff = date.today() - timedelta(days=365)
+
+            forecasts = (
+                session.query(ModelForecast)
+                .filter(ModelForecast.forecast_date >= cutoff)
+                .all()
+            )
+
+            errors = []
+            for fc in forecasts:
+                actual = (
+                    session.query(EconomicRelease)
+                    .filter_by(series_id="CPIAUCSL", reference_period=fc.reference_period)
+                    .first()
+                )
+                if actual and actual.value_mom is not None:
+                    errors.append(fc.mu_model - actual.value_mom)
+
+            if len(errors) < 3:
+                logger.info(
+                    f"Concept drift check: insufficient data ({len(errors)} resolved forecasts)"
+                )
+                return {"status": "insufficient_data", "n": len(errors)}
+
+            live_rmse       = float(np.sqrt(np.mean(np.array(errors) ** 2)))
+            historical_rmse = float(np.sqrt(np.mean(self.model.training_errors ** 2)))
+            ratio           = live_rmse / (historical_rmse + 1e-8)
+
+            if ratio > 1.5:
+                logger.warning(
+                    f"🔴 CONCEPT DRIFT — live RMSE={live_rmse:.4f} is "
+                    f"{ratio:.2f}× historical ({historical_rmse:.4f}). "
+                    "Consider retraining or manual review."
+                )
+                status = "critical"
+            elif ratio > 1.2:
+                logger.warning(
+                    f"🟡 Drift warning — live RMSE={live_rmse:.4f} is "
+                    f"{ratio:.2f}× historical ({historical_rmse:.4f})."
+                )
+                status = "warning"
+            else:
+                logger.info(
+                    f"✅ No concept drift — live RMSE={live_rmse:.4f} vs "
+                    f"historical={historical_rmse:.4f} (ratio={ratio:.2f})"
+                )
+                status = "ok"
+
+            return {
+                "status":           status,
+                "live_rmse":        live_rmse,
+                "historical_rmse":  historical_rmse,
+                "ratio":            ratio,
+                "n_resolved":       len(errors),
+            }
+        finally:
+            session.close()
+
+    # ─────────────────────────────────────────────
     # TRAINING
     # ─────────────────────────────────────────────
-    
+
     def train_model(self, start_year: int = 1995):
-        """Train the forecasting model. Run once to initialize."""
+        """
+        Train the forecasting model and deploy it if it passes rollback checks.
+
+        Pipeline:
+        1. Build training dataset
+        2. Train new CPIForecaster (v2.0 pipeline: tuned XGB, learned weights,
+           calibrated sigma, heteroskedastic sigma)
+        3. Rollback protection: only save if new WF-RMSE ≤ old × 1.10
+        4. Post-training concept drift check against live settled forecasts
+        """
         logger.info("Starting model training...")
-        
+
         df = self.feature_builder.build_training_dataset(start_year=start_year)
-        
+
         model = CPIForecaster()
         model.train(df, verbose=True)
+
+        # Rollback protection — refuse to deploy a regressed model
+        if not model.compare_to_disk(MODEL_PATH):
+            logger.error(
+                "Model rollback protection triggered — "
+                "new model is worse than the one on disk. "
+                "Keeping existing model. Investigate feature pipeline or data quality."
+            )
+            return self.model  # Return existing model unchanged
+
         model.save(MODEL_PATH)
-        
         self.model = model
         logger.info("✅ Model training complete")
+
+        # Post-training: check if live performance has drifted from historical
+        self._check_concept_drift()
+
         return model
 
 
